@@ -11,40 +11,56 @@ jobs:
     steps:
 
       # ============================
-      # ENABLE RDP + DISABLE NLA
+      # ENABLE RDP + FIX LISTENER
       # ============================
-      - name: Configure RDP + Disable NLA
+      - name: Enable Full RDP Listener
         run: |
-          # Enable Remote Desktop
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "fDenyTSConnections" -Value 0 -Force
+          Write-Host "=== Enabling RDP and fixing listener ==="
 
-          # Disable Network Level Authentication
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "UserAuthentication" -Value 0 -Force
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server" -Name "UserAuthentication" -Value 0 -Force
+          # Enable RDP
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v fDenyTSConnections /t REG_DWORD /d 0 /f
 
-          # Force TLS Security 0 → Allow older RDP handshake (fix for mstsc freeze)
-          Set-ItemProperty -Path "HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" -Name "SecurityLayer" -Value 0 -Force
+          # Disable NLA
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server" /v UserAuthentication /t REG_DWORD /d 0 /f
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v UserAuthentication /t REG_DWORD /d 0 /f
 
-          # Allow RDP port through firewall
+          # RDP Security Layer
+          reg add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v SecurityLayer /t REG_DWORD /d 0 /f
+
+          # Open port 3389 in firewall
           netsh advfirewall firewall add rule name="RDP" dir=in action=allow protocol=TCP localport=3389
 
-          # FULL restart of RDP service
+          # Enable RDP Services
+          Set-Service -Name TermService -StartupType Automatic
+
+          # Full restart
           Stop-Service TermService -Force
           Start-Service TermService
+
+          # Reinstall RDP stack (critical fix)
+          C:\Windows\System32\ocsetup.exe Remote-Desktop-Services
+          C:\Windows\System32\ocsetup.exe Remote-Desktop-Services-Rdp-Stack
+
+          # Re-register RDP listener
+          C:\Windows\System32\reg.exe add "HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp" /v PortNumber /t REG_DWORD /d 3389 /f
+          CScript C:\Windows\System32\SCRegEdit.wsf /CS 1
+
+          # Debug info
+          qwinsta
+          Write-Host "=== RDP Listener Enabled ==="
 
       # ============================
       # CREATE USER
       # ============================
-      - name: Create RDP user
+      - name: Create RDP User
         run: |
           Add-Type -AssemblyName System.Security
 
           $chars = ([char[]](33..126))
           $password = -join (1..16 | ForEach-Object { $chars | Get-Random })
-
           $secure = ConvertTo-SecureString $password -AsPlainText -Force
-          New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
 
+          New-LocalUser -Name "RDP" -Password $secure -AccountNeverExpires
           Add-LocalGroupMember -Group "Administrators" -Member "RDP"
           Add-LocalGroupMember -Group "Remote Desktop Users" -Member "RDP"
 
@@ -67,18 +83,18 @@ jobs:
       # ============================
       - name: Connect Tailscale
         run: |
-          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname="runner-$env:GITHUB_RUN_ID" --accept-dns=false
+          & "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=runner-$env:GITHUB_RUN_ID --accept-dns=false
 
           $ip = ""
           $tries = 0
           while ($ip -eq "" -and $tries -lt 20) {
               $ip = (& "$env:ProgramFiles\Tailscale\tailscale.exe" ip -4)
-              Start-Sleep -Seconds 3
+              Start-Sleep 3
               $tries++
           }
 
           if ($ip -eq "") {
-              Write-Error "No Tailscale IP assigned"
+              Write-Error "Tailscale failed to assign IP"
               exit 1
           }
 
@@ -87,15 +103,14 @@ jobs:
       # ============================
       # SHOW LOGIN INFO
       # ============================
-      - name: Show info
+      - name: Show Info
         run: |
           Write-Host ""
-          Write-Host "======== RDP READY ========"
+          Write-Host "=========== RDP READY ==========="
           Write-Host "IP:        $env:TS_IP"
-          Write-Host "User:      RDP"
+          Write-Host "Username:  RDP"
           Write-Host "Password:  $env:PASS"
-          Write-Host "==========================="
-          Write-Host "Leave this job running."
+          Write-Host "================================="
           Write-Host ""
 
       # ============================
@@ -104,6 +119,6 @@ jobs:
       - name: Keep Alive
         run: |
           while ($true) {
-              Write-Host "[$(Get-Date)] Online"
-              Start-Sleep -Seconds 300
+              Write-Host "[$(Get-Date)] Running..."
+              Start-Sleep 300
           }
